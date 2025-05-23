@@ -50,7 +50,7 @@ def concat_model_dict(data):
     return data
 
 
-def sel_subset(sel, ds_da):
+def sel_subset(sel, ds_da, coords_same_dim=False):
     """Subset a dictionary of dim: coord values.
 
     The returned dictionary contains only the keys that
@@ -61,7 +61,7 @@ def sel_subset(sel, ds_da):
     but
     """
     dim_subset = {key: value for key, value in sel.items() if key in ds_da.dims}
-    dims_with_coords = list(dim_subset)
+    dims_with_coords = [] if coords_same_dim else list(dim_subset)
     for key in sel:
         if key in dim_subset:
             continue
@@ -69,7 +69,8 @@ def sel_subset(sel, ds_da):
             da_indexer = ds_da[key]
             if da_indexer.ndim == 1 and da_indexer.dims[0] not in dims_with_coords:
                 dim_subset[key] = sel[key]
-                dims_with_coords.append(da_indexer.dims[0])
+                if not coords_same_dim:
+                    dims_with_coords.append(da_indexer.dims[0])
     return dim_subset
 
 
@@ -92,14 +93,16 @@ def subset_ds(ds, var_name, sel):
     ds = ds[var_name]
     if isinstance(ds, xr.DataTree):
         ds = ds.dataset
-    subset_dict = sel_subset(sel, ds)
+    subset_dict = sel_subset(sel, ds, coords_same_dim=True)
     if subset_dict:
-        for key in subset_dict:
+        for key, coord_values in subset_dict.items():
             if key not in ds.dims and key not in ds.xindexes:
                 ds = ds.set_xindex(key)
-        out = ds.sel(subset_dict)
-    else:
-        out = ds
+            try:
+                ds = ds.sel({key: coord_values})
+            except KeyError:
+                return None
+    out = ds
     if out.size == 1:
         return out.item()
     return out.values
@@ -116,15 +119,17 @@ def try_da_subset(da, sel):
       - `.sel` on the subset of dimensions present works -> return `da` subset
       - `.sel` raises a KeyError -> return ``None``
     """
-    subset_dict = sel_subset(sel, da)
+    subset_dict = sel_subset(sel, da, coords_same_dim=True)
     if subset_dict:
-        for key in subset_dict:
+        for key, coord_values in subset_dict.items():
             if key not in da.xindexes:
+                if da.coords[key].ndim == 0:
+                    da = da.expand_dims(key)
                 da = da.set_xindex(key)
-        try:
-            da = da.sel(subset_dict)
-        except KeyError:
-            return None
+            try:
+                da = da.sel({key: coord_values})
+            except KeyError:
+                return None
     return da
 
 
@@ -137,10 +142,13 @@ def process_kwargs_subset(value, var_name, sel):
         if var_name not in value.data_vars:
             subset_dict = sel_subset(sel, value)
             if subset_dict:
-                try:
-                    ds = value.sel(subset_dict)
-                except KeyError:
-                    return None
+                for key, coord_values in subset_dict.items():
+                    if key not in ds.dims and key not in ds.xindexes:
+                        ds = ds.set_xindex(key)
+                    try:
+                        ds = ds.sel({key: coord_values})
+                    except KeyError:
+                        return None
                 return ds
             return value
         value = value[var_name]
